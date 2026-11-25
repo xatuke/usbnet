@@ -30,14 +30,23 @@ func (m *mitmHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Host == "" {
-		if strings.HasPrefix(r.URL.Path, "/__usbnet/") {
-			if m.api != nil {
-				m.api.ServeHTTP(w, r)
-				return
-			}
+		if m.api != nil && strings.HasPrefix(r.URL.Path, "/__usbnet/") {
+			m.api.ServeHTTP(w, r)
+			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"running","mitm":true}`))
+		switch r.URL.Path {
+		case "/ca.pem":
+			w.Header().Set("Content-Type", "application/x-pem-file")
+			w.Header().Set("Content-Disposition", `attachment; filename="USBNet-CA.pem"`)
+			w.Write(m.caPEM)
+		case "/ca.der":
+			w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+			w.Header().Set("Content-Disposition", `attachment; filename="USBNet-CA.der"`)
+			w.Write(m.caCert.Raw)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"status":"running","mitm":true}`))
+		}
 		return
 	}
 

@@ -1,11 +1,8 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
-	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,12 +12,12 @@ import (
 
 const maxBodyLog = 64 * 1024
 
-type interceptLogger struct {
-	mu   sync.Mutex
+type fileLogger struct {
 	file *os.File
+	mu   sync.Mutex
 }
 
-func newInterceptLogger(dir string) (*interceptLogger, error) {
+func newFileLogger(dir string) (*fileLogger, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -28,47 +25,55 @@ func newInterceptLogger(dir string) (*interceptLogger, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &interceptLogger{file: f}, nil
+	return &fileLogger{file: f}, nil
 }
 
-type logEntry struct {
-	Time            string            `json:"time"`
+type logLine struct {
+	ID              uint64            `json:"id"`
+	Time            time.Time         `json:"time"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
+	Host            string            `json:"host"`
 	Status          int               `json:"status"`
 	RequestHeaders  map[string]string `json:"request_headers"`
 	ResponseHeaders map[string]string `json:"response_headers"`
 	RequestBody     string            `json:"request_body,omitempty"`
 	ResponseBody    string            `json:"response_body,omitempty"`
-	TLS             *tlsInfo          `json:"tls,omitempty"`
+	TLS             bool              `json:"tls"`
+	TLSServerName   string            `json:"tls_server_name,omitempty"`
+	DurationMS      int64             `json:"duration_ms"`
+	Error           string            `json:"error,omitempty"`
 }
 
-type tlsInfo struct {
-	ServerName string `json:"server_name"`
-	Version    string `json:"version"`
-}
-
-func (l *interceptLogger) logRequest(method, url string, status int, reqHeaders, respHeaders http.Header, reqBody, respBody []byte, tlsState *tls.ConnectionState) {
-	log.Printf("MITM %s %s → %d", method, url, status)
-	e := logEntry{
-		Time:            time.Now().UTC().Format(time.RFC3339),
-		Method:          method,
-		URL:             url,
-		Status:          status,
-		RequestHeaders:  flattenHeaders(reqHeaders),
-		ResponseHeaders: flattenHeaders(respHeaders),
-		RequestBody:     encodeBody(reqBody),
-		ResponseBody:    encodeBody(respBody),
+func (fl *fileLogger) run(store *requestStore) {
+	ch := store.subscribe()
+	for r := range ch {
+		line := logLine{
+			ID:              r.ID,
+			Time:            r.Time,
+			Method:          r.Method,
+			URL:             r.URL,
+			Host:            r.Host,
+			Status:          r.Status,
+			RequestHeaders:  flattenHeaders(r.RequestHeaders),
+			ResponseHeaders: flattenHeaders(r.ResponseHeaders),
+			RequestBody:     encodeBody(r.RequestBody),
+			ResponseBody:    encodeBody(r.ResponseBody),
+			TLS:             r.TLS,
+			TLSServerName:   r.TLSServerName,
+			DurationMS:      r.DurationMS,
+			Error:           r.Error,
+		}
+		fl.mu.Lock()
+		_ = json.NewEncoder(fl.file).Encode(line)
+		fl.mu.Unlock()
 	}
-	if tlsState != nil {
-		e.TLS = &tlsInfo{ServerName: tlsState.ServerName, Version: tlsVersionString(tlsState.Version)}
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_ = json.NewEncoder(l.file).Encode(e)
 }
 
-func flattenHeaders(h http.Header) map[string]string {
+func flattenHeaders(h map[string][]string) map[string]string {
+	if h == nil {
+		return nil
+	}
 	m := make(map[string]string, len(h))
 	for k, vs := range h {
 		m[k] = vs[0]
@@ -90,19 +95,4 @@ func encodeBody(b []byte) string {
 		return string(b)
 	}
 	return "base64:" + base64.StdEncoding.EncodeToString(b)
-}
-
-func tlsVersionString(v uint16) string {
-	switch v {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return "unknown"
-	}
 }

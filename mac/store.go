@@ -112,6 +112,13 @@ func (s *requestStore) get(id uint64) *interceptedRequest {
 	return nil
 }
 
+func (s *requestStore) count() int {
+	s.mu.RLock()
+	n := len(s.requests)
+	s.mu.RUnlock()
+	return n
+}
+
 func (s *requestStore) clear() {
 	s.mu.Lock()
 	s.requests = nil

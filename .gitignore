@@ -6,4 +6,5 @@ ios/App/App.entitlements
 ios/Tunnel/Info.plist
 ios/Tunnel/Tunnel.entitlements
 mac/usbnet
+mac/mac
 .DS_Store

@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -44,6 +46,8 @@ func main() {
 		skip := fs.String("skip", "", "comma-separated interfaces to ignore (e.g. en0)")
 		name := fs.String("name", "", "name shown on the iPhone (default: this Mac's computer name)")
 		logTo := fs.String("log", "", `log file ("default" = ~/Library/Logs/usbnet.log)`)
+		mitm := fs.Bool("mitm", false, "enable MITM interception of HTTPS traffic")
+		mitmDir := fs.String("mitm-dir", "", `directory for CA certs and logs (default: ~/.usbnet)`)
 		_ = fs.Parse(os.Args[2:])
 		if *logTo != "" {
 			if *logTo == "default" {
@@ -54,9 +58,19 @@ func main() {
 				log.SetOutput(f)
 			}
 		}
-		run(*port, splitList(*skip), *name)
+		if *mitm {
+			if *mitmDir == "" {
+				home, _ := os.UserHomeDir()
+				*mitmDir = filepath.Join(home, ".usbnet")
+			}
+			runMITM(*port, splitList(*skip), *name, *mitmDir)
+		} else {
+			run(*port, splitList(*skip), *name)
+		}
 	case "status":
 		status()
+	case "pinbypass":
+		pinbypass(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -66,8 +80,10 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usbnet: share this Mac's internet with an iPhone over USB
 
-  usbnet run [-port 8888]     run the proxy (the USB Net app starts this in the background)
-  usbnet status               show the USB links usbnet would use`)
+  usbnet run [-port 8888]       run the proxy (the USB Net app starts this in the background)
+  usbnet run -mitm              run with HTTPS interception (MITM mode)
+  usbnet status                 show the USB links usbnet would use
+  usbnet pinbypass [app-name]   bypass certificate pinning on an iOS app via Frida`)
 }
 
 func splitList(s string) map[string]bool {
@@ -181,6 +197,125 @@ func run(port int, skip map[string]bool, name string) {
 			sync1()
 		}
 	}
+}
+
+func runMITM(port int, skip map[string]bool, name, mitmDir string) {
+	caPair, caCert, err := loadOrCreateCA(mitmDir)
+	if err != nil {
+		log.Fatalf("CA init: %v", err)
+	}
+	caKey := caPair.PrivateKey.(*rsa.PrivateKey)
+	caPEMBlock := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
+
+	log.Printf("MITM CA: %s/ca.pem", mitmDir)
+
+	store := newRequestStore()
+
+	fl, err := newFileLogger(filepath.Join(mitmDir, "logs"))
+	if err != nil {
+		log.Fatalf("logger: %v", err)
+	}
+	go fl.run(store)
+
+	api := &apiHandler{store: store, caPEM: caPEMBlock}
+	handler := &mitmHandler{
+		caCert: caCert,
+		caKey:  caKey,
+		store:  store,
+		caPEM:  caPEMBlock,
+		api:    api,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	host := name
+	if host == "" {
+		if out, err := exec.Command("/usr/sbin/scutil", "--get", "ComputerName").Output(); err == nil {
+			host = strings.TrimSpace(string(out))
+		}
+	}
+	if host == "" {
+		host, _ = os.Hostname()
+		host = strings.TrimSuffix(host, ".local")
+	}
+
+	active := map[string]*listener{}
+	var mu sync.Mutex
+	sync1 := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		want := usbLinks(skip)
+		for name, l := range active {
+			if ip, ok := want[name]; !ok || ip.String() != l.ip {
+				log.Printf("%s: link gone or changed (%s), stopping", name, l.ip)
+				l.close()
+				delete(active, name)
+			}
+		}
+		for name, ip := range want {
+			if _, ok := active[name]; ok {
+				continue
+			}
+			l, err := startWithHandler(name, ip.String(), port, host, handler)
+			if err != nil {
+				log.Printf("%s: %v", name, err)
+				continue
+			}
+			active[name] = l
+		}
+	}
+	log.Printf("usbnet: MITM mode, watching for iPhone USB links (proxy port %d)", port)
+	log.Printf("usbnet: API at http://<link-ip>:%d/__usbnet/status", port)
+	sync1()
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			mu.Lock()
+			for _, l := range active {
+				l.close()
+			}
+			mu.Unlock()
+			log.Print("usbnet: stopped")
+			return
+		case <-t.C:
+			sync1()
+		}
+	}
+}
+
+func startWithHandler(iface, ip string, port int, host string, handler http.Handler) (*listener, error) {
+	ifi, err := net.InterfaceByName(iface)
+	if err != nil {
+		return nil, err
+	}
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_BOUND_IF, ifi.Index)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	ln, err := lc.Listen(context.Background(), "tcp4", net.JoinHostPort(ip, fmt.Sprint(port)))
+	if err != nil {
+		return nil, err
+	}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("%s: %v", iface, err)
+		}
+	}()
+	adv := exec.Command("/usr/bin/dns-sd", "-R", host, serviceType, "local", fmt.Sprint(port), "addr="+ip, fmt.Sprintf("port=%d", port))
+	if err := adv.Start(); err != nil {
+		log.Printf("%s: bonjour advertise failed: %v", iface, err)
+		adv = nil
+	}
+	log.Printf("%s: MITM proxy at %s:%d", iface, ip, port)
+	return &listener{ip: ip, srv: srv, advert: adv}, nil
 }
 
 func start(iface, ip string, port int, host string) (*listener, error) {
