@@ -1,0 +1,9 @@
+build/
+*.xcodeproj/
+ios/Local.xcconfig
+ios/App/Info.plist
+ios/App/App.entitlements
+ios/Tunnel/Info.plist
+ios/Tunnel/Tunnel.entitlements
+mac/usbnet
+.DS_Store

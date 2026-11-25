@@ -1,0 +1,4 @@
+// Copy Local.example.xcconfig to Local.xcconfig and set your team and bundle ID prefix.
+BUNDLE_ID_PREFIX = com.example
+DEVELOPMENT_TEAM =
+#include? "Local.xcconfig"

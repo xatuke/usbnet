@@ -1,0 +1,4 @@
+// Your Apple Developer team ID (Xcode → Settings → Accounts, or developer.apple.com → Membership).
+DEVELOPMENT_TEAM = ABCDE12345
+// A reverse-DNS prefix you own. The app becomes <prefix>.usbnet.
+BUNDLE_ID_PREFIX = com.yourname
