@@ -64,6 +64,25 @@ struct ContentView: View {
             Button("Disconnect", role: .destructive) { Task { await disconnect() } }
           }
         }
+        if status == .connected {
+          Section {
+            Button {
+              let p = Int(port) ?? 8888
+              if let url = URL(string: "http://\(host):\(p)/ca.der") {
+                UIApplication.shared.open(url)
+              }
+            } label: {
+              Label("Install CA Certificate for MITM", systemImage: "shield.lefthalf.filled")
+            }
+            Text("Opens Safari to download the CA certificate. After downloading, go to Settings → General → VPN & Device Management to install, then Settings → General → About → Certificate Trust Settings to trust it.")
+              .font(.footnote)
+              .foregroundStyle(.secondary)
+          } header: {
+            Text("MITM Proxy")
+          } footer: {
+            Text("Only needed when the Mac runs in MITM mode for HTTPS traffic inspection.")
+          }
+        }
         if status != .connected {
           Section {
             if finder.macs.isEmpty && !manual {
@@ -110,6 +129,8 @@ struct ContentView: View {
 
   private func connect(_ host: String, _ port: Int) async {
     error = nil
+    self.host = host
+    self.port = String(port)
     do {
       let m = try await manager()
       let proto = NETunnelProviderProtocol()

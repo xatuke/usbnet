@@ -1,9 +1,9 @@
-import Network
+import Darwin
 import NetworkExtension
 
 /// Sets a phone-wide HTTP/HTTPS proxy that points at the Mac on the USB link. The tunnel itself
-/// carries no packets. Every 5 s it checks that the Mac still answers; after 3 misses (cable
-/// unplugged, Mac asleep) it stops, so the phone goes back to its normal connection.
+/// carries no packets. Every 5 s it checks that the USB link is still there; after 3 misses (cable
+/// unplugged) it stops, so the phone goes back to its normal connection.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
   private var timer: DispatchSourceTimer?
   private var misses = 0
@@ -51,21 +51,27 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     timer = t
   }
 
+  /// The cable is present while the phone has an IPv4 link-local (169.254.x.x) address on an
+  /// interface that is up. A socket probe to the Mac is not used: iOS blocks it from the extension
+  /// (Local Network privacy), which made the tunnel stop by itself.
   private func check() {
-    let conn = NWConnection(host: .init(host), port: .init(integerLiteral: UInt16(port)), using: .tcp)
-    var done = false
-    conn.stateUpdateHandler = { [weak self] state in
-      guard let self, !done else { return }
-      switch state {
-      case .ready: done = true; self.misses = 0; conn.cancel()
-      case .failed, .waiting: done = true; self.miss(); conn.cancel()
-      default: break
-      }
+    if usbLinkPresent() { misses = 0 } else { miss() }
+  }
+
+  private func usbLinkPresent() -> Bool {
+    var list: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&list) == 0, let first = list else { return true }
+    defer { freeifaddrs(list) }
+    var p: UnsafeMutablePointer<ifaddrs>? = first
+    while let ifa = p {
+      defer { p = ifa.pointee.ifa_next }
+      let flags = Int32(ifa.pointee.ifa_flags)
+      guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0,
+            let addr = ifa.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+      let a = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { UInt32(bigEndian: $0.pointee.sin_addr.s_addr) }
+      if a >> 16 == 0xA9FE { return true }  // 169.254.0.0/16
     }
-    conn.start(queue: .global())
-    DispatchQueue.global().asyncAfter(deadline: .now() + 3) { [weak self] in
-      if !done { done = true; self?.miss(); conn.cancel() }
-    }
+    return false
   }
 
   private func miss() {

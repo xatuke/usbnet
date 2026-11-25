@@ -184,7 +184,23 @@ func run(port int, skip map[string]bool, name string) {
 }
 
 func start(iface, ip string, port int, host string) (*listener, error) {
-	ln, err := net.Listen("tcp4", net.JoinHostPort(ip, fmt.Sprint(port)))
+	// Bind the socket to the USB interface (IP_BOUND_IF). The Mac can have more than one route to
+	// 169.254.0.0/16 (for example on Wi-Fi), and without this the replies to the phone can leave on
+	// the wrong interface. Accepted connections inherit the binding.
+	ifi, err := net.InterfaceByName(iface)
+	if err != nil {
+		return nil, err
+	}
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_BOUND_IF, ifi.Index)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	ln, err := lc.Listen(context.Background(), "tcp4", net.JoinHostPort(ip, fmt.Sprint(port)))
 	if err != nil {
 		return nil, err
 	}
